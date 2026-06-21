@@ -5,6 +5,15 @@ import func2url from '../../backend/func2url.json';
 const API = func2url.files;
 const CHUNK_API = func2url.filechunk;
 const MAX_SIZE = 200 * 1024 * 1024; // 200 МБ
+const CHUNK_SIZE = 3 * 1024 * 1024; // 3 МБ данных (~4 МБ body после base64)
+
+const sliceToBase64 = (blob: Blob): Promise<string> =>
+  new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res((r.result as string).split(',')[1]);
+    r.onerror = rej;
+    r.readAsDataURL(blob);
+  });
 
 interface FileItem {
   id: number;
@@ -90,45 +99,39 @@ const Files = () => {
     log(`Начинаю: ${fileName} (${fmtSize(file.size)})`);
 
     try {
-      // Шаг 1: получить presigned URL от бэкенда
-      log(`${fileName}: запрашиваю URL загрузки...`);
-      const { presigned_url, cdn_url } = await postJSON(CHUNK_API, {
-        action: 'presign',
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
+      log(`${fileName}: создаю сессию (${totalChunks} частей)...`);
+
+      // Шаг 1: создать сессию
+      const { session_id } = await postJSON(CHUNK_API, {
+        action: 'init',
         file_name: fileName,
         file_type: fileType,
-      });
-      upd({ progress: 15 });
-      log(`${fileName}: URL получен, загружаю напрямую в хранилище...`);
-
-      // Шаг 2: PUT файла напрямую в S3 с прогрессом через XHR
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', presigned_url, true);
-        xhr.setRequestHeader('Content-Type', fileType);
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const pct = 15 + Math.round((e.loaded / e.total) * 75);
-            upd({ progress: pct });
-          }
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve();
-          else reject(new Error(`S3 PUT Error: HTTP ${xhr.status}`));
-        };
-        xhr.onerror = () => reject(new Error('Сетевая ошибка при загрузке в S3'));
-        xhr.send(file);
+        total_chunks: totalChunks,
       });
 
-      upd({ progress: 92 });
-      log(`${fileName}: файл загружен, сохраняю запись...`);
+      // Шаг 2: отправить части последовательно
+      for (let i = 0; i < totalChunks; i++) {
+        const slice = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        const b64 = await sliceToBase64(slice);
+        await postJSON(CHUNK_API, {
+          action: 'chunk',
+          session_id,
+          chunk_index: i,
+          content_base64: b64,
+        });
+        const pct = 5 + Math.round(((i + 1) / totalChunks) * 85);
+        upd({ progress: pct });
+        log(`${fileName}: часть ${i + 1}/${totalChunks}`);
+      }
 
-      // Шаг 3: подтвердить в БД
+      // Шаг 3: склеить и сохранить
+      upd({ progress: 93 });
+      log(`${fileName}: собираю файл...`);
       await postJSON(CHUNK_API, {
-        action: 'confirm',
-        file_name: fileName,
-        file_type: fileType,
+        action: 'finish',
+        session_id,
         file_size: file.size,
-        cdn_url,
       });
 
       upd({ status: 'done', progress: 100 });

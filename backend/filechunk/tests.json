@@ -1,1 +1,4 @@
-{"tests": [{"name": "OPTIONS preflight", "method": "OPTIONS", "path": "/", "expectedStatus": 200}]}
+{"tests": [
+  {"name": "OPTIONS preflight", "method": "OPTIONS", "path": "/", "expectedStatus": 200},
+  {"name": "init session", "method": "POST", "path": "/", "body": {"action": "init", "file_name": "t.zip", "file_type": "application/zip", "total_chunks": 1}, "expectedStatus": 200, "expectedBody": {"session_id": "string"}, "bodyMatcher": "partial"}
+]}
