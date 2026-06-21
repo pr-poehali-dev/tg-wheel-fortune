@@ -4,7 +4,7 @@ import func2url from '../../backend/func2url.json';
 
 const API = func2url.files;
 const CHUNK_API = func2url.filechunk;
-const CHUNK_SIZE = 4 * 1024 * 1024;
+const CHUNK_SIZE = 512 * 1024; // 512 КБ — укладывается в лимит body cloud function
 const MAX_SIZE = 50 * 1024 * 1024;
 
 interface FileItem {
