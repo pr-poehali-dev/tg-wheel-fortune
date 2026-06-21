@@ -24,6 +24,7 @@ const Files = () => {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState('');
   const [desc, setDesc] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -34,38 +35,63 @@ const Files = () => {
       const d = await r.json();
       setFiles(d.files || []);
     } catch (e) {
-      console.error(e);
+      console.error('load error', e);
     }
     setLoading(false);
   };
 
-  useEffect(() => {
-    load();
-  }, []);
+  useEffect(() => { load(); }, []);
 
   const upload = async (file: File) => {
     setUploading(true);
+    setUploadStatus('Получаю адрес загрузки...');
     try {
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let binary = '';
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      const base64 = btoa(binary);
-
-      await fetch(API, {
+      // Шаг 1: получаем presigned URL
+      const presignRes = await fetch(`${API}/presign`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           file_name: file.name,
           file_type: file.type || 'application/octet-stream',
-          description: desc,
-          content_base64: base64,
         }),
       });
+      const { presigned_url, s3_key, cdn_url } = await presignRes.json();
+
+      // Шаг 2: грузим файл напрямую в S3
+      setUploadStatus(`Загружаю ${fmtSize(file.size)}...`);
+      const uploadRes = await fetch(presigned_url, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      });
+
+      if (!uploadRes.ok) {
+        setUploadStatus(`Ошибка загрузки: ${uploadRes.status}`);
+        setUploading(false);
+        return;
+      }
+
+      // Шаг 3: регистрируем в БД
+      setUploadStatus('Сохраняю в базу данных...');
+      await fetch(`${API}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_name: file.name,
+          file_type: file.type || 'application/octet-stream',
+          file_size: file.size,
+          s3_key,
+          cdn_url,
+          description: desc,
+        }),
+      });
+
       setDesc('');
+      setUploadStatus('');
       await load();
     } catch (e) {
-      console.error(e);
+      console.error('upload error', e);
+      setUploadStatus('Ошибка — попробуйте ещё раз');
     }
     setUploading(false);
   };
@@ -112,7 +138,7 @@ const Files = () => {
             className="game-tile w-full flex items-center justify-center gap-2 disabled:opacity-70"
           >
             <Icon name={uploading ? 'Loader' : 'Upload'} size={22} className={uploading ? 'animate-spin' : ''} />
-            {uploading ? 'Загрузка...' : 'Выбрать и загрузить файл'}
+            {uploading ? (uploadStatus || 'Загрузка...') : 'Выбрать и загрузить файл'}
           </button>
         </div>
 
@@ -128,7 +154,7 @@ const Files = () => {
               className="rounded-xl p-3 flex items-center gap-3"
               style={{ background: 'rgba(255,255,255,0.92)' }}
             >
-              <Icon name="FileText" size={28} className="text-[#3568c6] shrink-0" />
+              <Icon name="FileArchive" size={28} className="text-[#3568c6] shrink-0" />
               <div className="flex-1 min-w-0">
                 <a
                   href={f.cdn_url}
@@ -141,6 +167,7 @@ const Files = () => {
                 <div className="text-xs text-gray-500">
                   {fmtSize(f.file_size)}
                   {f.description ? ` · ${f.description}` : ''}
+                  {' · '}{new Date(f.created_at).toLocaleString('ru-RU')}
                 </div>
               </div>
               <button onClick={() => remove(f.id)} className="shrink-0 p-2 text-red-500 hover:bg-red-50 rounded-lg">
