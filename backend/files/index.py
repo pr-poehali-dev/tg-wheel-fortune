@@ -64,6 +64,32 @@ def handler(event: dict, context) -> dict:
             return err('empty body')
 
         body = json.loads(raw_body)
+        params = event.get('queryStringParameters') or {}
+
+        # Режим регистрации уже загруженного файла (после multipart upload)
+        if params.get('register') == '1':
+            cdn_url = body.get('cdn_url') or ''
+            file_name = (body.get('file_name') or 'file').replace('/', '_')
+            file_type = body.get('file_type') or 'application/octet-stream'
+            file_size = int(body.get('file_size') or 0)
+            description = body.get('description') or ''
+            print(f"[files] register cdn_url={cdn_url} size={file_size}")
+            if not cdn_url:
+                return err('cdn_url required')
+            fn = file_name.replace("'", "''")
+            ft = file_type.replace("'", "''")
+            fu = cdn_url.replace("'", "''")
+            fd = description.replace("'", "''")
+            cur.execute(
+                f"INSERT INTO project_files (file_name, file_type, file_size, cdn_url, description) "
+                f"VALUES ('{fn}', '{ft}', {file_size}, '{fu}', '{fd}') RETURNING id"
+            )
+            new_id = cur.fetchone()[0]
+            cur.close(); conn.close()
+            print(f"[files] registered id={new_id}")
+            return ok({'id': new_id, 'cdn_url': cdn_url})
+
+        # Обычная загрузка через base64 (файлы до 5 МБ)
         file_name = (body.get('file_name') or 'file').replace('/', '_')
         file_type = body.get('file_type') or 'application/octet-stream'
         description = body.get('description') or ''
