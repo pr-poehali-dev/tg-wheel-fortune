@@ -1,6 +1,8 @@
 import json
 import os
 import base64
+import uuid
+import psycopg2
 import boto3
 
 CORS = {
@@ -10,6 +12,9 @@ CORS = {
     'Access-Control-Max-Age': '86400',
 }
 JSON_H = {'Content-Type': 'application/json'}
+
+# Временное хранилище чанков в памяти (живёт в рамках одного инстанса функции)
+_chunks: dict = {}
 
 
 def ok(data):
@@ -29,13 +34,25 @@ def get_s3():
     )
 
 
+def get_db():
+    conn = psycopg2.connect(os.environ['DATABASE_URL'])
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS project_files ("
+        "id SERIAL PRIMARY KEY, file_name TEXT NOT NULL, file_type TEXT, "
+        "file_size BIGINT DEFAULT 0, cdn_url TEXT NOT NULL, "
+        "description TEXT DEFAULT '', created_at TIMESTAMP DEFAULT now())"
+    )
+    return conn, cur
+
+
 def handler(event: dict, context) -> dict:
     '''
-    Multipart upload чанков в S3.
-    action=init   -> создать multipart upload, вернуть upload_id + key
-    action=chunk  -> загрузить часть (part_number, upload_id, key, content_base64)
-    action=finish -> завершить (upload_id, key, parts=[{part_number, etag}])
-    action=abort  -> отменить (upload_id, key)
+    Чанковая загрузка файлов до 50 МБ через накопление в памяти.
+    action=init   -> начать сессию, получить session_id
+    action=chunk  -> отправить часть (session_id, chunk_index, content_base64)
+    action=finish -> собрать все части, залить в S3, сохранить в БД
     '''
     method = event.get('httpMethod', 'POST')
 
@@ -47,51 +64,80 @@ def handler(event: dict, context) -> dict:
 
     body = json.loads(event.get('body') or '{}')
     action = body.get('action')
-    s3 = get_s3()
-    access_key = os.environ['AWS_ACCESS_KEY_ID']
+
+    print(f"[chunk] action={action}")
 
     if action == 'init':
+        session_id = uuid.uuid4().hex
         file_name = (body.get('file_name') or 'file').replace('/', '_')
         file_type = body.get('file_type') or 'application/octet-stream'
-        import uuid
-        key = f"uploads/{uuid.uuid4().hex}_{file_name}"
-        resp = s3.create_multipart_upload(Bucket='files', Key=key, ContentType=file_type)
-        upload_id = resp['UploadId']
-        cdn_url = f"https://cdn.poehali.dev/projects/{access_key}/bucket/{key}"
-        print(f"[chunk] init key={key} upload_id={upload_id}")
-        return ok({'upload_id': upload_id, 'key': key, 'cdn_url': cdn_url})
+        total_chunks = int(body.get('total_chunks') or 1)
+        _chunks[session_id] = {
+            'file_name': file_name,
+            'file_type': file_type,
+            'total_chunks': total_chunks,
+            'parts': {},
+        }
+        print(f"[chunk] init session={session_id} total_chunks={total_chunks}")
+        return ok({'session_id': session_id})
 
     if action == 'chunk':
-        upload_id = body.get('upload_id')
-        key = body.get('key')
-        part_number = int(body.get('part_number', 1))
+        session_id = body.get('session_id')
+        chunk_index = int(body.get('chunk_index', 0))
         content_b64 = body.get('content_base64') or ''
         raw = base64.b64decode(content_b64)
-        print(f"[chunk] part {part_number} size={len(raw)} upload_id={upload_id}")
-        resp = s3.upload_part(
-            Bucket='files', Key=key,
-            UploadId=upload_id, PartNumber=part_number, Body=raw
-        )
-        etag = resp['ETag']
-        return ok({'part_number': part_number, 'etag': etag})
+        print(f"[chunk] chunk session={session_id} index={chunk_index} size={len(raw)}")
+        if session_id not in _chunks:
+            return err('session not found — call init first')
+        _chunks[session_id]['parts'][chunk_index] = raw
+        return ok({'received': chunk_index, 'size': len(raw)})
 
     if action == 'finish':
-        upload_id = body.get('upload_id')
-        key = body.get('key')
-        parts = body.get('parts', [])
-        print(f"[chunk] finish upload_id={upload_id} parts={len(parts)}")
-        s3.complete_multipart_upload(
-            Bucket='files', Key=key, UploadId=upload_id,
-            MultipartUpload={'Parts': [{'PartNumber': p['part_number'], 'ETag': p['etag']} for p in parts]}
+        session_id = body.get('session_id')
+        description = body.get('description') or ''
+        file_size = int(body.get('file_size') or 0)
+        print(f"[chunk] finish session={session_id}")
+
+        if session_id not in _chunks:
+            return err('session not found — возможно функция перезапустилась, попробуйте снова')
+
+        sess = _chunks[session_id]
+        total = sess['total_chunks']
+        parts = sess['parts']
+
+        if len(parts) != total:
+            return err(f'получено {len(parts)} из {total} частей')
+
+        # Собираем все чанки по порядку
+        raw_bytes = b''.join(parts[i] for i in range(total))
+        actual_size = len(raw_bytes)
+        print(f"[chunk] assembled {actual_size} bytes")
+
+        access_key = os.environ['AWS_ACCESS_KEY_ID']
+        s3 = get_s3()
+        key = f"uploads/{uuid.uuid4().hex}_{sess['file_name']}"
+        s3.put_object(
+            Bucket='files', Key=key,
+            Body=raw_bytes,
+            ContentType=sess['file_type']
         )
         cdn_url = f"https://cdn.poehali.dev/projects/{access_key}/bucket/{key}"
-        return ok({'cdn_url': cdn_url})
+        print(f"[chunk] S3 ok -> {cdn_url}")
 
-    if action == 'abort':
-        upload_id = body.get('upload_id')
-        key = body.get('key')
-        s3.abort_multipart_upload(Bucket='files', Key=key, UploadId=upload_id)
-        print(f"[chunk] aborted upload_id={upload_id}")
-        return ok({'aborted': True})
+        fn = sess['file_name'].replace("'", "''")
+        ft = sess['file_type'].replace("'", "''")
+        fu = cdn_url.replace("'", "''")
+        fd = description.replace("'", "''")
+        conn, cur = get_db()
+        cur.execute(
+            f"INSERT INTO project_files (file_name, file_type, file_size, cdn_url, description) "
+            f"VALUES ('{fn}', '{ft}', {actual_size or file_size}, '{fu}', '{fd}') RETURNING id"
+        )
+        new_id = cur.fetchone()[0]
+        cur.close(); conn.close()
+
+        del _chunks[session_id]
+        print(f"[chunk] DB saved id={new_id}")
+        return ok({'id': new_id, 'cdn_url': cdn_url, 'file_size': actual_size})
 
     return err(f'unknown action: {action}')
