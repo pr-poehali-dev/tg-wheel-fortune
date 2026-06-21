@@ -1,0 +1,59 @@
+{
+  "tests": [
+    {
+      "name": "Upsert progress",
+      "method": "POST",
+      "path": "/",
+      "body": {
+        "action": "upsert_progress",
+        "id": 99990001,
+        "name": "TestPlayer",
+        "balance_w": 12345,
+        "balance_b": 7,
+        "game_level": 3,
+        "claimed_level": 2,
+        "onboarding_done": true,
+        "level_stats": {"spinsTotal": 5}
+      },
+      "expectedStatus": 200,
+      "expectedBody": {"ok": true},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Get progress",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "get_progress", "id": 99990001},
+      "expectedStatus": 200,
+      "expectedBody": {"ok": true, "found": true, "balance_w": 12345, "game_level": 3},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Leaderboard",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "leaderboard", "limit": 10},
+      "expectedStatus": 200,
+      "expectedBody": {"ok": true},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Referral register",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "referral_register", "inviter_id": 99990001, "friend_id": 99990002, "name": "Friend"},
+      "expectedStatus": 200,
+      "expectedBody": {"ok": true},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Referrals my",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "referrals_my", "id": 99990001},
+      "expectedStatus": 200,
+      "expectedBody": {"ok": true},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

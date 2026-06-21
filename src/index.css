@@ -150,4 +150,31 @@
     paint-order: stroke fill;
     text-shadow: 0 3px 0 rgba(0, 0, 0, 0.25);
   }
+
+  .game-card {
+    @apply rounded-2xl p-3 text-white;
+    background: linear-gradient(180deg, #6bb3ff 0%, #2b66b9 100%);
+    box-shadow:
+      inset 0 0 0 3px #0b2f68,
+      0 4px 8px rgba(0, 0, 0, 0.25);
+  }
+}
+
+@keyframes sheetUp {
+  0% {
+    transform: translateY(100%);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+@keyframes toastUp {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 20px);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
