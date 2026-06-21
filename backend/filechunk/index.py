@@ -13,7 +13,6 @@ CORS = {
 }
 JSON_H = {'Content-Type': 'application/json'}
 
-# Временное хранилище чанков в памяти (живёт в рамках одного инстанса функции)
 _chunks: dict = {}
 
 
@@ -49,7 +48,7 @@ def get_db():
 
 def handler(event: dict, context) -> dict:
     '''
-    Чанковая загрузка файлов до 50 МБ через накопление в памяти.
+    Чанковая загрузка файлов до 50 МБ.
     action=init   -> начать сессию, получить session_id
     action=chunk  -> отправить часть (session_id, chunk_index, content_base64)
     action=finish -> собрать все части, залить в S3, сохранить в БД
@@ -64,8 +63,7 @@ def handler(event: dict, context) -> dict:
 
     body = json.loads(event.get('body') or '{}')
     action = body.get('action')
-
-    print(f"[chunk] action={action}")
+    print(f"[filechunk] action={action}")
 
     if action == 'init':
         session_id = uuid.uuid4().hex
@@ -78,7 +76,7 @@ def handler(event: dict, context) -> dict:
             'total_chunks': total_chunks,
             'parts': {},
         }
-        print(f"[chunk] init session={session_id} total_chunks={total_chunks}")
+        print(f"[filechunk] init session={session_id} total_chunks={total_chunks}")
         return ok({'session_id': session_id})
 
     if action == 'chunk':
@@ -86,7 +84,7 @@ def handler(event: dict, context) -> dict:
         chunk_index = int(body.get('chunk_index', 0))
         content_b64 = body.get('content_base64') or ''
         raw = base64.b64decode(content_b64)
-        print(f"[chunk] chunk session={session_id} index={chunk_index} size={len(raw)}")
+        print(f"[filechunk] chunk session={session_id} index={chunk_index} size={len(raw)}")
         if session_id not in _chunks:
             return err('session not found — call init first')
         _chunks[session_id]['parts'][chunk_index] = raw
@@ -96,10 +94,10 @@ def handler(event: dict, context) -> dict:
         session_id = body.get('session_id')
         description = body.get('description') or ''
         file_size = int(body.get('file_size') or 0)
-        print(f"[chunk] finish session={session_id}")
+        print(f"[filechunk] finish session={session_id}")
 
         if session_id not in _chunks:
-            return err('session not found — возможно функция перезапустилась, попробуйте снова')
+            return err('session not found — функция перезапустилась, попробуйте снова')
 
         sess = _chunks[session_id]
         total = sess['total_chunks']
@@ -108,21 +106,16 @@ def handler(event: dict, context) -> dict:
         if len(parts) != total:
             return err(f'получено {len(parts)} из {total} частей')
 
-        # Собираем все чанки по порядку
         raw_bytes = b''.join(parts[i] for i in range(total))
         actual_size = len(raw_bytes)
-        print(f"[chunk] assembled {actual_size} bytes")
+        print(f"[filechunk] assembled {actual_size} bytes")
 
         access_key = os.environ['AWS_ACCESS_KEY_ID']
         s3 = get_s3()
         key = f"uploads/{uuid.uuid4().hex}_{sess['file_name']}"
-        s3.put_object(
-            Bucket='files', Key=key,
-            Body=raw_bytes,
-            ContentType=sess['file_type']
-        )
+        s3.put_object(Bucket='files', Key=key, Body=raw_bytes, ContentType=sess['file_type'])
         cdn_url = f"https://cdn.poehali.dev/projects/{access_key}/bucket/{key}"
-        print(f"[chunk] S3 ok -> {cdn_url}")
+        print(f"[filechunk] S3 ok -> {cdn_url}")
 
         fn = sess['file_name'].replace("'", "''")
         ft = sess['file_type'].replace("'", "''")
@@ -137,7 +130,7 @@ def handler(event: dict, context) -> dict:
         cur.close(); conn.close()
 
         del _chunks[session_id]
-        print(f"[chunk] DB saved id={new_id}")
+        print(f"[filechunk] DB saved id={new_id}")
         return ok({'id': new_id, 'cdn_url': cdn_url, 'file_size': actual_size})
 
     return err(f'unknown action: {action}')

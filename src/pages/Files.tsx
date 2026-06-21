@@ -3,7 +3,7 @@ import Icon from '@/components/ui/icon';
 import func2url from '../../backend/func2url.json';
 
 const API = func2url.files;
-const CHUNK_API = (func2url as Record<string, string>)['files-chunk'];
+const CHUNK_API = func2url.filechunk;
 const CHUNK_SIZE = 4 * 1024 * 1024;
 const MAX_SIZE = 50 * 1024 * 1024;
 
